@@ -1,0 +1,5 @@
+thunderbird
+qbittorrent
+vlc
+# Steam needs the multilib repo (enabled by Omarchy).
+steam

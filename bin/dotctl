@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+# dotctl — apply, check and roll back this dotfiles repo. Run `dotctl help`.
+set -Eeuo pipefail
+
+REPO_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+export REPO_DIR
+
+for lib in log os pkg state link feature secrets; do
+  # shellcheck source=/dev/null
+  source "$REPO_DIR/scripts/lib/$lib.sh"
+done
+
+PROFILE='' ONLY='' EXTRA='' SKIP=''
+ASSUME_YES=0 CHECK=0 NO_PACKAGES=0 NO_VERIFY=0 BOOTSTRAP_OMARCHY=0 PARTIAL=0
+ACTIVE=() SKIPPED=()
+
+usage() {
+  cat <<EOF
+Usage: dotctl <command> [options]
+
+Commands:
+  install        Install packages, link configs, enable services, run hooks and migrations
+  plan           Show what install would change (same as install --dry-run)
+  verify         Health check: links, packages, services and each feature's own checks
+  status         Show link drift, repo changes and the last transaction
+  adopt [PATH]   Copy files that replaced a link (e.g. rewritten by Omarchy) back into the repo
+  rollback [ID]  Undo the last install (or transaction ID) and restore backed-up files
+  history        List transactions
+  new NAME       Create features/NAME from the template
+  list           List features and profiles
+  doctor         Diagnose common problems
+
+Options (install/plan/verify/status/adopt):
+  -p, --profile NAME     Profile to use (default: last used, else "default")
+      --only a,b         Only these features (plus their dependencies), no profile overlay
+      --with a,b         Add features to the profile
+      --skip a,b         Leave out features
+  -n, --dry-run          Print actions without changing anything
+      --check            Dry run that exits 3 if anything would change (idempotency test)
+  -y, --yes              Don't ask for confirmation
+      --no-packages      Skip package installation
+      --no-verify        Skip the health check after install
+      --bootstrap-omarchy  On plain Arch, install Omarchy first
+  -v, --verbose          Show every command
+EOF
+}
+
+parse_opts() {
+  ARGS=()
+  while (($#)); do
+    case $1 in
+      -p | --profile)
+        PROFILE=${2:?}
+        shift
+        ;;
+      --only)
+        ONLY=${2:?}
+        PARTIAL=1
+        shift
+        ;;
+      --with)
+        EXTRA=${2:?}
+        shift
+        ;;
+      --skip)
+        SKIP=${2:?}
+        PARTIAL=1
+        shift
+        ;;
+      -n | --dry-run) DRY_RUN=1 ;;
+      --check) DRY_RUN=1 CHECK=1 ;;
+      -y | --yes) ASSUME_YES=1 ;;
+      --no-packages) NO_PACKAGES=1 ;;
+      --no-verify) NO_VERIFY=1 ;;
+      --bootstrap-omarchy) BOOTSTRAP_OMARCHY=1 ;;
+      -v | --verbose) VERBOSE=1 ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*) die "unknown option: $1" ;;
+      *) ARGS+=("$1") ;;
+    esac
+    shift
+  done
+}
+
+select_features() {
+  PROFILE=${PROFILE:-$(cat "$STATE_DIR/profile" 2>/dev/null || echo default)}
+  local list f
+  local -a wanted=() extra=() skip=()
+  if [[ -n $ONLY ]]; then
+    IFS=, read -ra wanted <<<"$ONLY"
+  else
+    list=$(profile_features "$PROFILE")
+    mapfile -t wanted <<<"$list"
+    [[ -n $EXTRA ]] && IFS=, read -ra extra <<<"$EXTRA" && wanted+=("${extra[@]}")
+  fi
+  [[ -n $SKIP ]] && IFS=, read -ra skip <<<"$SKIP"
+
+  local -a filtered=()
+  for f in "${wanted[@]}"; do
+    [[ -n $f && " ${skip[*]} " != *" $f "* ]] && filtered+=("$f")
+  done
+  ((${#filtered[@]})) || die "no features selected"
+  resolve_features "${filtered[@]}"
+
+  for f in "${ORDER[@]}"; do
+    feature_load "$f"
+    if feature_supported; then ACTIVE+=("$f"); else SKIPPED+=("$f"); fi
+  done
+}
+
+build_link_plan() {
+  local f p chain
+  for f in "${ACTIVE[@]}"; do link_collect "feature $f" "$FEATURES_DIR/$f/home"; done
+  [[ -n $ONLY ]] && return 0
+  chain=$(profile_chain "$PROFILE")
+  for p in $chain; do link_collect "profile $p" "$PROFILES_DIR/$p/home" override; done
+}
+
+# Runs HOOK for every active feature, with the feature's metadata loaded.
+each_feature() {
+  local f
+  for f in "${ACTIVE[@]}"; do
+    feature_load "$f"
+    "$@"
+  done
+}
+
+phase_packages() { pkg_feature_packages "$FEATURE_DIR"; }
+phase_services() {
+  local u
+  for u in "${FEATURE_SERVICES_USER[@]}"; do svc_enable user "$u"; done
+  for u in "${FEATURE_SERVICES_SYSTEM[@]}"; do svc_enable system "$u"; done
+}
+
+run_migrations() {
+  local done_file=$STATE_DIR/migrations.done m
+  local -a all=()
+  mapfile -t all < <(find "$REPO_DIR/migrations" -maxdepth 1 -name '[0-9]*.sh' -printf '%f\n' | sort)
+  if [[ ! -f $done_file ]]; then
+    # First install on this machine: the configs already contain every
+    # migration's end state, so mark them all as applied.
+    ((DRY_RUN)) && return 0
+    : >"$done_file"
+    ((${#all[@]})) && printf '%s\n' "${all[@]}" >"$done_file"
+    return 0
+  fi
+  for m in "${all[@]}"; do
+    grep -qxF "$m" "$done_file" && continue
+    changed
+    info "migration $m"
+    ((DRY_RUN)) && continue
+    DRY_RUN=0 bash "$REPO_DIR/migrations/$m"
+    echo "$m" >>"$done_file"
+    txn_record MIGRATION "$m" -
+  done
+}
+
+_APPLYING=0
+_on_exit() {
+  local rc=$?
+  ((_APPLYING && rc != 0)) || return 0
+  fail "install failed (exit $rc)"
+  if ((! DRY_RUN)) && [[ -s $TXN_DIR/journal ]]; then
+    warn "rolling back the changes made by this run"
+    txn_rollback "$TXN_DIR"
+    warn "rolled back; packages installed by this run were kept"
+  fi
+}
+
+cmd_install() {
+  os_detect
+  os_validate
+  os_bootstrap_omarchy
+  select_features
+  build_link_plan
+
+  log "Plan"
+  info "profile:  $PROFILE${ONLY:+ (ignored: --only)}"
+  info "features: ${ACTIVE[*]}"
+  ((${#SKIPPED[@]})) && warn "skipped (need Omarchy): ${SKIPPED[*]}"
+  info "links:    ${#LINK_PLAN[@]} files"
+  ((DRY_RUN)) || confirm "Apply to $HOME?" || die "aborted"
+
+  if ((! DRY_RUN)); then
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/lock"
+    flock -n 9 || die "another dotctl run is in progress"
+  fi
+
+  txn_begin
+  _APPLYING=1
+  trap _on_exit EXIT
+  trap 'exit 130' INT TERM
+
+  if ((! NO_PACKAGES)); then
+    log "Packages"
+    each_feature phase_packages
+  fi
+  log "Pre-install hooks"
+  each_feature feature_call feature_pre_install
+  log "Links"
+  link_apply_all
+  log "Post-install hooks"
+  each_feature feature_call feature_post_install
+  log "Services"
+  each_feature phase_services
+  log "Migrations"
+  run_migrations
+
+  txn_commit
+  _APPLYING=0
+  ((DRY_RUN || PARTIAL)) || echo "$PROFILE" >"$STATE_DIR/profile"
+
+  if ((CHANGES == 0)); then
+    ok "nothing to change, system matches the repo"
+  elif ((DRY_RUN)); then
+    info "$CHANGES change(s) would be made"
+  else
+    ok "$CHANGES change(s) applied"
+  fi
+
+  if ((CHECK && CHANGES > 0)); then exit 3; fi
+  ((DRY_RUN || NO_VERIFY)) || cmd_verify_selected
+}
+
+cmd_verify_selected() {
+  local failures=0 dest state f u missing
+  local -a dests
+  mapfile -t dests < <(link_dests)
+  log "Verifying"
+  for dest in "${dests[@]}"; do
+    state=$(link_state "$dest" "${LINK_PLAN[$dest]}")
+    [[ $state == ok ]] || {
+      fail "~/${dest#"$HOME"/}: $state"
+      failures=$((failures + 1))
+    }
+  done
+  for f in "${ACTIVE[@]}"; do
+    feature_load "$f"
+    missing=$(pkg_feature_missing "$FEATURE_DIR" | tr '\n' ' ')
+    [[ -z ${missing// /} ]] || {
+      fail "$f: packages missing: $missing"
+      failures=$((failures + 1))
+    }
+    for u in "${FEATURE_SERVICES_USER[@]}"; do
+      svc_is_enabled user "$u" || {
+        fail "$f: user service $u not enabled"
+        failures=$((failures + 1))
+      }
+    done
+    for u in "${FEATURE_SERVICES_SYSTEM[@]}"; do
+      svc_is_enabled system "$u" || {
+        fail "$f: service $u not enabled"
+        failures=$((failures + 1))
+      }
+    done
+    if ! feature_call feature_verify; then
+      fail "$f: health check failed"
+      failures=$((failures + 1))
+    fi
+  done
+  if ((failures)); then
+    fail "$failures problem(s). Try: bin/dotctl status, bin/dotctl install, docs/troubleshooting.md"
+    return 1
+  fi
+  ok "${#ACTIVE[@]} features healthy, ${#LINK_PLAN[@]} links in place"
+}
+
+cmd_verify() {
+  os_detect
+  select_features
+  build_link_plan
+  cmd_verify_selected
+}
+
+cmd_status() {
+  os_detect
+  select_features
+  build_link_plan
+  local dest state drift=0
+  local -a dests
+  mapfile -t dests < <(link_dests)
+  log "Links (profile $PROFILE)"
+  for dest in "${dests[@]}"; do
+    state=$(link_state "$dest" "${LINK_PLAN[$dest]}")
+    if [[ $state == ok ]]; then debug "ok ~/${dest#"$HOME"/}"; else
+      drift=$((drift + 1))
+      warn "$(printf '%-8s' "$state") ~/${dest#"$HOME"/}"
+    fi
+  done
+  ((drift)) && info "drifted = a program replaced the link with a file; keep its version with: bin/dotctl adopt" \
+    || ok "all ${#LINK_PLAN[@]} links in place"
+  log "Repo"
+  if [[ -n $(git -C "$REPO_DIR" status --porcelain) ]]; then
+    git -C "$REPO_DIR" status --short | sed 's/^/    /'
+  else
+    ok "no uncommitted changes"
+  fi
+  log "Last transaction"
+  if [[ -L $STATE_DIR/last ]]; then info "$(basename "$(readlink "$STATE_DIR/last")")"; else info "none"; fi
+}
+
+cmd_adopt() {
+  os_detect
+  select_features
+  build_link_plan
+  local dest src n=0
+  local -a targets=()
+  if ((${#ARGS[@]})); then
+    for dest in "${ARGS[@]}"; do targets+=("$(readlink -m "$dest")"); done
+  else
+    mapfile -t targets < <(link_dests)
+  fi
+  txn_begin
+  log "Adopting"
+  for dest in "${targets[@]}"; do
+    src=${LINK_PLAN[$dest]:-}
+    [[ -n $src ]] || die "$dest is not managed by this repo"
+    [[ $(link_state "$dest" "$src") == drifted ]] || continue
+    info "~/${dest#"$HOME"/} -> ${src#"$REPO_DIR"/}"
+    run cp "$dest" "$src"
+    link_apply_one "$dest" "$src"
+    n=$((n + 1))
+  done
+  txn_commit
+  ((n)) && info "review with: git -C $REPO_DIR diff" || ok "nothing to adopt"
+}
+
+cmd_rollback() {
+  local id=${ARGS[0]:-} dir='' d
+  local -a txns=()
+  if [[ -z $id ]]; then
+    mapfile -t txns < <(find "$STATE_DIR/transactions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+    for d in "${txns[@]}"; do
+      [[ -f $d/ROLLED_BACK ]] || {
+        dir=$d
+        break
+      }
+    done
+  else
+    dir=$STATE_DIR/transactions/$id
+  fi
+  [[ -n $dir && -d $dir ]] || die "no transaction to roll back (see: bin/dotctl history)"
+  [[ ! -f $dir/ROLLED_BACK ]] || die "$(basename "$dir") was already rolled back"
+
+  log "Rolling back $(basename "$dir")"
+  sed 's/^/    /' "$dir/journal"
+  grep -q '^MIGRATION' "$dir/journal" && warn "migrations cannot be undone automatically"
+  ((DRY_RUN)) || confirm "Undo these changes?" || die "aborted"
+  os_detect
+  txn_rollback "$dir"
+
+  ((DRY_RUN)) && return 0
+
+  # Verify: nothing from the journal still links into the repo, and every backup is back.
+  local op a b bad=0
+  while IFS=$'\t' read -r op a b; do
+    case $op in
+      LINK) [[ -L $a && $(readlink "$a") == "$b" ]] && {
+        fail "still linked: $a"
+        bad=1
+      } ;;
+      BACKUP) [[ -e $a || -L $a ]] || {
+        fail "not restored: $a"
+        bad=1
+      } ;;
+    esac
+  done <"$dir/journal"
+  ((bad)) && return 1
+  ok "rolled back and verified"
+}
+
+cmd_new() {
+  local name=${ARGS[0]:-}
+  [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "usage: dotctl new <name> (lowercase, digits, dashes)"
+  local dir=$FEATURES_DIR/$name
+  [[ ! -e $dir ]] || die "features/$name already exists"
+  cp -r "$FEATURES_DIR/_template" "$dir"
+  sed -i "s/^FEATURE_NAME=.*/FEATURE_NAME=$name/" "$dir/feature.sh"
+  rm -f "$dir/README.md"
+  ok "created features/$name"
+  info "next: edit feature.sh, fill packages/*.txt, put configs under home/, add it to a profile"
+  info "then: bin/dotctl plan --only $name"
+}
+
+cmd_list() {
+  local f p
+  log "Features"
+  for f in "$FEATURES_DIR"/*/; do
+    f=$(basename "$f")
+    [[ $f == _* ]] && continue
+    (feature_load "$f" && printf '    %-16s %-8s %s\n' "$f" "$FEATURE_REQUIRES" "$FEATURE_DESC")
+  done
+  log "Profiles"
+  for p in "$PROFILES_DIR"/*/; do
+    p=$(basename "$p")
+    printf '    %-20s %s\n' "$p" "$(profile_features "$p" | tr '\n' ' ')"
+  done
+}
+
+cmd_doctor() {
+  os_detect
+  log "Environment"
+  ((BASH_VERSINFO[0] >= 5)) && ok "bash $BASH_VERSION" || fail "bash 5+ required"
+  command -v git >/dev/null && ok "git" || fail "git missing"
+  ((EUID == 0)) || { command -v sudo >/dev/null && ok "sudo" || fail "sudo missing"; }
+  [[ $PKG_MANAGER != none ]] && ok "package manager: $PKG_MANAGER" || fail "no supported package manager"
+  [[ $PKG_MANAGER != pacman || -n $AUR_HELPER ]] && ok "AUR helper: ${AUR_HELPER:-n/a}" || warn "no AUR helper (yay/paru): AUR packages will fail"
+  ((IS_OMARCHY)) && ok "Omarchy $(omarchy version 2>/dev/null || echo '?')" || warn "Omarchy not detected"
+  command -v systemctl >/dev/null && systemctl --user is-system-running >/dev/null 2>&1 \
+    && ok "systemd user session" || warn "no systemd user session: services cannot be enabled"
+
+  log "Repo"
+  local branch
+  branch=$(git -C "$REPO_DIR" branch --show-current 2>/dev/null || true)
+  info "branch ${branch:-detached} at $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  [[ -z $(git -C "$REPO_DIR" status --porcelain) ]] && ok "clean" || warn "uncommitted changes (bin/dotctl status)"
+
+  log "State"
+  [[ -d $STATE_DIR ]] && ok "state dir $STATE_DIR" || info "never installed on this machine"
+  local broken
+  broken=$(find "$HOME/.config" "$HOME/.local" -xtype l -lname "$REPO_DIR/*" 2>/dev/null || true)
+  [[ -z $broken ]] && ok "no broken links into the repo" || {
+    warn "broken links (repo moved or file deleted?):"
+    sed 's/^/      /' <<<"$broken"
+  }
+  if [[ -f $SECRETS_FILE ]]; then
+    [[ $(stat -c %a "$SECRETS_FILE") == 600 ]] && ok "secrets file is private" || warn "chmod 600 $SECRETS_FILE"
+  fi
+  info "next: bin/dotctl status, then bin/dotctl verify"
+}
+
+main() {
+  local cmd=${1:-help}
+  (($#)) && shift
+  parse_opts "$@"
+  case $cmd in
+    install) cmd_install ;;
+    plan) DRY_RUN=1 && cmd_install ;;
+    verify) cmd_verify ;;
+    status) cmd_status ;;
+    adopt) cmd_adopt ;;
+    rollback) cmd_rollback ;;
+    history) txn_list ;;
+    new) cmd_new ;;
+    list) cmd_list ;;
+    doctor) cmd_doctor ;;
+    help | -h | --help) usage ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,4 @@
+thunderbird
+qbittorrent
+vlc
+# Chrome and Steam: add their vendor repos first.

@@ -1,0 +1,8 @@
+external-sources=true
+# `cond && ok || fail` is used deliberately for one-line status output.
+disable=SC2015
+# Variables are shared across sourced files (lib/*.sh, feature.sh, bin/dotctl).
+disable=SC2034
+# "~/path" in messages is display text, not a path to expand.
+disable=SC2088
+disable=SC2001

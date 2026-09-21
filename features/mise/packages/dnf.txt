@@ -1,0 +1,2 @@
+# Needs the COPR repo from https://mise.jdx.dev/installing-mise.html#dnf first.
+mise

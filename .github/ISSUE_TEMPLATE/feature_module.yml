@@ -1,0 +1,38 @@
+name: New feature module
+description: Add an app or setting as a feature module
+labels: [feature]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Feature name
+      placeholder: obs
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What it sets up
+    validations:
+      required: true
+  - type: textarea
+    id: packages
+    attributes:
+      label: Packages per manager
+      placeholder: "pacman: obs-studio\napt: obs-studio"
+  - type: textarea
+    id: config
+    attributes:
+      label: Config files (only the ones changed from defaults)
+      placeholder: ~/.config/obs-studio/global.ini
+  - type: textarea
+    id: hooks
+    attributes:
+      label: Hooks, services or secrets needed
+  - type: dropdown
+    id: requires
+    attributes:
+      label: Needs Omarchy?
+      options: ["no (portable)", "yes"]
+    validations:
+      required: true

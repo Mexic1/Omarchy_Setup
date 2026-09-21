@@ -1,0 +1,27 @@
+name: Something looks or works wrong
+description: A config from this repo misbehaves after install
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What's wrong
+    validations:
+      required: true
+  - type: input
+    id: feature
+    attributes:
+      label: Feature(s) involved
+      placeholder: hyprland, omarchy-shell
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`omarchy version` and `git -C ~/Projects/Omarchy_Setup describe --always`"
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `bin/dotctl status`
+      render: text

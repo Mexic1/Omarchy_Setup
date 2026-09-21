@@ -1,0 +1,2 @@
+# herdr ships with Omarchy; on other distros install it from its releases page.
+herdr

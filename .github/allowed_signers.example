@@ -1,0 +1,3 @@
+# Copy to .github/allowed_signers with your SSH signing public key.
+# The principal is any label; your email is not required.
+# maintainer ssh-ed25519 AAAA...your-public-key...

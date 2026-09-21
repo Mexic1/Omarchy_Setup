@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag signature
+        run: ci/verify-signatures.sh "$GITHUB_REF_NAME"
+
+      - name: Check VERSION and CHANGELOG match the tag
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ $(cat VERSION) == "$version" ]] || { echo "::error::VERSION is $(cat VERSION), tag is $version"; exit 1; }
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+
+      - name: Build archive and checksums
+        run: |
+          name=omarchy-setup-$GITHUB_REF_NAME
+          git archive --format=tar.gz --prefix="$name/" -o "$name.tar.gz" "$GITHUB_REF_NAME"
+          sha256sum "$name.tar.gz" > SHA256SUMS
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}' CHANGELOG.md > notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag omarchy-setup-*.tar.gz SHA256SUMS

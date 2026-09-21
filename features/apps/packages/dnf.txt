@@ -1,0 +1,4 @@
+thunderbird
+qbittorrent
+vlc
+# VLC and Steam need RPM Fusion.

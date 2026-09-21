@@ -1,0 +1,2 @@
+# Not in the default repos: add https://mise.jdx.dev/installing-mise.html#apt first.
+mise

@@ -1,0 +1,41 @@
+# Secrets never go in this repo (see docs/secrets.md)
+.env
+.env.*
+*.env
+secrets.env*
+!secrets.example
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.gpg
+*.asc
+.netrc
+credentials*
+*token*
+.github/allowed_signers.local
+
+# App state that must not be captured as config
+**/chromium/
+**/google-chrome*/
+**/BraveSoftware/
+**/.thunderbird/
+**/Cookies*
+**/Login Data*
+**/History*
+
+# Local backups and editor/OS noise
+*.bak
+*.bak.*
+*.orig
+*.swp
+*~
+.DS_Store
+*.dotctl-tmp.*
+
+# Release artifacts
+omarchy-setup-*.tar.gz
+SHA256SUMS
+notes.md

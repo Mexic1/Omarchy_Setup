@@ -1,0 +1,9 @@
+# Default gitleaks rules plus a check for personal emails in configs.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "config-email"
+description = "Email address in a config file"
+regex = '''(?i)email\s*=\s*["']?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}'''
+path = '''^(features|profiles)/'''

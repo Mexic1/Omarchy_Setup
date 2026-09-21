@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "release/**", "hotfix/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck shfmt jq lua5.4
+      - run: sudo ln -sf "$(command -v luac5.4)" /usr/local/bin/luac
+      - run: ci/lint.sh
+      - run: ci/syntax.sh
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dry-run:
+    name: Dry run (${{ matrix.distro }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: arch
+            image: archlinux:latest
+            prep: pacman -Syu --noconfirm --needed git
+          - distro: ubuntu
+            image: ubuntu:24.04
+            prep: apt-get update -qq && apt-get install -y -qq git
+          - distro: fedora
+            image: fedora:latest
+            prep: dnf install -y -q git findutils
+          - distro: opensuse
+            image: opensuse/tumbleweed
+            prep: zypper --non-interactive install git findutils
+    container: ${{ matrix.image }}
+    steps:
+      - run: ${{ matrix.prep }}
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: ci/dry-run.sh
+
+  dry-run-nix:
+    name: Dry run (nix)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: PKG_MANAGER=nix ci/dry-run.sh
+
+  smoke:
+    name: Smoke test (install, idempotency, rollback)
+    needs: lint
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm --needed git sudo
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: ci/smoke.sh

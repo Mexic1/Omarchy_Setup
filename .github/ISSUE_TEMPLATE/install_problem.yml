@@ -1,0 +1,38 @@
+name: Install problem
+description: install.sh or dotctl failed or left something broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: profile
+    attributes:
+      label: Profile and command
+      placeholder: ./install.sh -p laptop-convertible
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `bin/dotctl doctor`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: verbose
+    attributes:
+      label: Output of `bin/dotctl install -v --dry-run`
+      description: Check it for anything personal before pasting.
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checked
+      options:
+        - label: I went through the install checklist in docs/troubleshooting.md
+        - label: I removed any personal data from the logs above
