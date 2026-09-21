@@ -31,5 +31,7 @@ machine being restored.
 ## Tools
 
 ```bash
-omarchy pkg add shellcheck shfmt jq lua
+omarchy pkg add shellcheck jq lua
+# shfmt must be v3.14.1, the version CI pins (other versions format differently):
+curl -fsSLo ~/.local/bin/shfmt https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64 && chmod +x ~/.local/bin/shfmt
 ```

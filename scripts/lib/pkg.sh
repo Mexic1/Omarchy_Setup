@@ -53,7 +53,7 @@ pkg_install() {
       fi
       ;;
     apt)
-      if ((! _APT_UPDATED)); then run $SUDO apt-get update -qq && _APT_UPDATED=1; fi
+      if ((_APT_UPDATED == 0)); then run $SUDO apt-get update -qq && _APT_UPDATED=1; fi
       run $SUDO apt-get install -y "${missing[@]}"
       ;;
     dnf) run $SUDO dnf install -y "${missing[@]}" ;;

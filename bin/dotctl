@@ -163,7 +163,7 @@ _on_exit() {
   local rc=$?
   ((_APPLYING && rc != 0)) || return 0
   fail "install failed (exit $rc)"
-  if ((! DRY_RUN)) && [[ -s $TXN_DIR/journal ]]; then
+  if ((DRY_RUN == 0)) && [[ -s $TXN_DIR/journal ]]; then
     warn "rolling back the changes made by this run"
     txn_rollback "$TXN_DIR"
     warn "rolled back; packages installed by this run were kept"
@@ -184,7 +184,7 @@ cmd_install() {
   info "links:    ${#LINK_PLAN[@]} files"
   ((DRY_RUN)) || confirm "Apply to $HOME?" || die "aborted"
 
-  if ((! DRY_RUN)); then
+  if ((DRY_RUN == 0)); then
     mkdir -p "$STATE_DIR"
     exec 9>"$STATE_DIR/lock"
     flock -n 9 || die "another dotctl run is in progress"
@@ -195,7 +195,7 @@ cmd_install() {
   trap _on_exit EXIT
   trap 'exit 130' INT TERM
 
-  if ((! NO_PACKAGES)); then
+  if ((NO_PACKAGES == 0)); then
     log "Packages"
     each_feature phase_packages
   fi
